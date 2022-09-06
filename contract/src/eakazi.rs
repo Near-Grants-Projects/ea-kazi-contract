@@ -8,27 +8,24 @@ pub const CERTIFICATE_CONTRACT: &str = "certificate.eakazi.testnet";
 pub const XCC_GAS: Gas = Gas(20000000000000);
 
 
-#[derive(Default)]
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct Course {
-    id: u128,
+    id: U128,
     name: String,
     description: String,
-    status: u8,
     course_key: String,
     skills: Vec<U128>
 }
 
 
 impl Course {
-    pub fn new(id_: u128, name_: String, description_: String, course_key_: String, skills_: Vec<U128>) -> Self {
+    pub fn new(id_: U128, name_: String, description_: String, course_key_: String, skills_: Vec<U128>) -> Self {
         Self {
             id: id_,
             name: name_,
             description: description_,
             course_key: course_key_,
-            skills: skills_,
-            ..Default::default()
+            skills: skills_
         }
     }
 }
@@ -127,9 +124,9 @@ trait Certificate {
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct EAKazi {
-    courses: Vec<Course>,
-    jobs: Vec<Job>,
-    job_applications: Vec<JobApplication>,
+    courses: LookupMap<U128, Course>,
+    jobs: LookupMap<U128, Job>,
+    job_applications: LookupMap<U128, LookupMap<AccountId, JobApplication>>,
     course_trainer: LookupMap<U128, AccountId>,
     enrolments: LookupMap<U128, Vec<AccountId>>,
     certificates: LookupMap<AccountId, Vec<CertificateToken>>,
@@ -148,9 +145,9 @@ impl EAKazi {
 
     // this function takes owner as parameter as it will only be called when course is verified by admin.
     pub fn create_course(&mut self, owner: AccountId, course_id: U128, name_: String, description_: String, course_key_: String, skills_: Vec<U128>) {
-        require!(!self.course_exists(&course_key_), "This course is already created");
-        let course = Course::new(course_id.clone().0, name_, description_, course_key_, skills_);
-        self.courses.push(course);
+        require!(!self.course_exists(&course_id), "This course is already created");
+        let course = Course::new(course_id.clone(), name_, description_, course_key_, skills_);
+        self.courses.insert(&course_id, &course);
         self.course_trainer.insert(&course_id, &owner);
     }
 
@@ -159,7 +156,7 @@ impl EAKazi {
     pub fn enroll_for_course(&mut self, course_id: U128) {
         //require!(self.get_course_by_id(&course_id).unwrap(), "This course has not been created");
         let trainee = env::signer_account_id();
-        let mut registered_trainees = self.enrolments.get(&course_id).unwrap();
+        let mut registered_trainees = self.enrolments.get(&course_id).unwrap_or_default();
         registered_trainees.push(trainee);
         self.enrolments.insert(&course_id, &registered_trainees);
     }
@@ -186,20 +183,21 @@ impl EAKazi {
 
     // for jobs exceeding 12 months, 12 month wage would be initially deducted
     #[payable]
-    pub fn create_job(&mut self, job_owner: AccountId, name: String, description_: String, skills_: Vec<U128>, wage: U128, number_of_roles: u128, duration: u128) {
-        let job_id = u128::try_from(self.job_applications.len() + 1).unwrap();
+    pub fn create_job(&mut self, job_id_: U128, job_owner: AccountId, name: String, description_: String, skills_: Vec<U128>, wage: U128, number_of_roles: u128, duration: u128) {
+
         let wage_to_pay = wage.0 * number_of_roles * duration;
         require!(env::attached_deposit() >= wage_to_pay, "Attach wage to be paid to escrow first");
         let job_owner = env::signer_account_id();
-        let job = Job::new(U128::from(job_id), name, description_, skills_, job_owner.clone(), wage, number_of_roles);
-        self.jobs.push(job);
-        let previous_wages_in_escrow = self.wages_in_escrow.get(&job_owner).unwrap();
+        let job = Job::new(job_id_, name, description_, skills_, job_owner.clone(), wage, number_of_roles);
+        self.jobs.insert(&job_id_, &job);
+        let previous_wages_in_escrow = self.wages_in_escrow.get(&job_owner).unwrap_or(U128::from(0));
         let increment_wage = U128::from(wage_to_pay + previous_wages_in_escrow.0);
         self.wages_in_escrow.insert(&job_owner, &increment_wage);
     }
 
     pub fn apply_to_job(&mut self, job_id: U128) {
-        require!(self.job_exists(job_id.clone()), "Job with provided id does not exist");
+        require!(self.job_exists(&job_id), "Job with provided id does not exist");
+
         let applicant = env::signer_account_id();
         let trainers_for_job = self.user_has_skills_for_job(&applicant, &job_id).unwrap_or_default();
         
@@ -211,64 +209,72 @@ impl EAKazi {
             trainers.push(trainer.clone());
         }
 
-        let application = JobApplication::new(job_id, trainers, applicant);
-        self.job_applications.push(application);
+        let application = JobApplication::new(job_id.clone(), trainers, applicant.clone());
+        let mut apps = self.job_applications.get(&job_id).unwrap();
+        apps.insert(&applicant, &application);
 
+        self.job_applications.insert(&job_id, &apps);
 
     }
 
     pub fn confirm_job_emloyment(&mut self, job_id: U128, applicant: AccountId) {
-        require!(self.job_exists(job_id.clone()), "Job with provided id does not exist");
+        require!(self.job_exists(&job_id), "Job with provided id does not exist");
         require!(env::signer_account_id() == self.get_job_by_id(&job_id).unwrap().job_owner, "Only job owner can confirm employment");
 
-        let apps = &self.job_applications;
-
+        let mut apps = self.job_applications.get(&job_id).unwrap();
+        require!(&apps.contains_key(&applicant), "The applicant has not applied for this job");
         
-        for application in apps {
-            if application.job_id == job_id && application.applicant == applicant {
-                application.status = 1;
-                application.start_date = Some(env::block_timestamp());
-            }
-        }
+        let mut job_app = apps.get(&applicant).unwrap();
+
+        job_app.status = 1;
+        job_app.start_date = Some(env::block_timestamp());
+        
+        apps.insert(&applicant, &job_app);
+        self.job_applications.insert(&job_id, &apps);
     }
+
 
     pub fn end_job_employment(&mut self, job_id: U128, applicant: AccountId) {
-        require!(self.job_exists(job_id.clone()), "Job with provided id does not exist");
+        require!(self.job_exists(&job_id), "Job with provided id does not exist");
         require!(env::signer_account_id() == self.get_job_by_id(&job_id).unwrap().job_owner, "Only job owner can confirm employment");
 
-        for application in self.job_applications {
-            if application.job_id == job_id && application.applicant == applicant {
-                application.status = 2;
-            }
-        }
+        let mut apps = self.job_applications.get(&job_id).unwrap();
+        require!(&apps.contains_key(&applicant), "The applicant has not applied for this job");
+        
+        let mut job_app = apps.get(&applicant).unwrap();
+
+        job_app.status = 2;
+        
+        apps.insert(&applicant, &job_app);
+        self.job_applications.insert(&job_id, &apps);
     }
 
-    // pub fn pay_wage(&mut self, job_id: U128, applicant: AccountId) {
-    //     require!(self.job_exists(job_id.clone()), "Job with provided id does not exist");
-    //     let job = self.get_job_by_id(&job_id).unwrap();
-    //     let owner = job.job_owner;
-    //     require!(env::signer_account_id() == owner.clone(), "Only job owner can confirm wage payment");
+    pub fn pay_wage(&mut self, job_id: U128, applicant: AccountId) {
+        require!(self.job_exists(&job_id), "Job with provided id does not exist");
+        let job = self.get_job_by_id(&job_id).unwrap();
+        let owner = job.job_owner;
+        require!(env::signer_account_id() == owner.clone(), "Only job owner can confirm wage payment");
 
-    //     let mut wage_in_excrow = self.wages_in_escrow.get(&owner).unwrap_or(U128::from(0));
-    //     let wage_for_job = job.wage;
+        let mut wage_in_excrow = self.wages_in_escrow.get(&owner).unwrap_or(U128::from(0));
+        let wage_for_job = job.wage;
 
-    //     let application = self.get_job_aplication(&job_id, &applicant).unwrap();
-    //     let trainers = application.trainers_to_pay;
+        let application = self.get_job_aplication(&job_id, &applicant).unwrap();
+        let trainers = application.trainers_to_pay;
 
-    //     let wage_to_applicant = (wage_for_job.0 * 9)/10;
-    //     let wage_to_trainer = (wage_for_job.0 - wage_to_applicant)/u128::try_from(trainers.len()).unwrap_or(1);
+        let wage_to_applicant = (wage_for_job.0 * 9)/10;
+        let wage_to_trainer = (wage_for_job.0 - wage_to_applicant)/u128::try_from(trainers.len()).unwrap_or(1);
 
-    //     wage_in_excrow = U128::from(wage_in_excrow.0 - wage_for_job.0);
+        wage_in_excrow = U128::from(wage_in_excrow.0 - wage_for_job.0);
 
-    //     Promise::new(applicant).transfer(wage_to_applicant)
-    //         .then(Self::ext(env::current_account_id())
-    //             .with_static_gas(XCC_GAS)
-    //             .on_pay_wage_callback(owner, wage_in_excrow));
+        Promise::new(applicant).transfer(wage_to_applicant)
+            .then(Self::ext(env::current_account_id())
+                .with_static_gas(XCC_GAS)
+                .on_pay_wage_callback(owner, wage_in_excrow));
 
-    //     for trainer in trainers {
-    //         Promise::new(trainer).transfer(wage_to_trainer);
-    //     }
-    // }
+        for trainer in trainers {
+            Promise::new(trainer).transfer(wage_to_trainer);
+        }
+    }
 
 
 
@@ -314,23 +320,13 @@ impl EAKazi {
     }
 
     #[private]
-    pub fn course_exists(&self, course_key_: &String) -> bool {
-        for course in self.courses.iter() {
-            if &course.course_key == course_key_ {
-                return true;
-            }
-        }
-        false
+    pub fn course_exists(&self, course_id_: &U128) -> bool {
+        self.courses.contains_key(course_id_)
     }
 
     #[private]
-    pub fn job_exists(&self, job_id: U128) -> bool {
-        for job in self.jobs.iter() {
-            if job.id == job_id {
-                return true;
-            }
-        }
-        false
+    pub fn job_exists(&self, job_id: &U128) -> bool {
+        self.jobs.contains_key(job_id)
     }
 
     #[private]
@@ -344,37 +340,19 @@ impl EAKazi {
     }
 
     #[private]
-    pub fn get_course_by_id(&self, course_id_: &U128) -> Option<&Course> {
-        for course in &self.courses {
-            if course.id == course_id_.0 {
-                return Some(course.clone());
-            }
-        }
-        None
+    pub fn get_course_by_id(&self, course_id_: &U128) -> Option<Course> {
+        self.courses.get(&course_id_)
     }
 
     #[private]
-    pub fn get_job_by_id(&self, job_id_: &U128) -> Option<&Job> {
-        let job: JobApplication = self.job_applications[job_id_.0.try_into().unwrap()];
-        for job in &self.jobs {
-            if &job.id == job_id_ {
-                return Some(job);
-            }
-        }
-        None
+    pub fn get_job_by_id(&self, job_id_: &U128) -> Option<Job> {
+        self.jobs.get(&job_id_)
     }
 
-    // #[private]
-    // pub fn get_job_aplication(&self, job_id_: &U128, applicant: &AccountId) -> Option<JobApplication> {
-    //     let mut app = None;
-    //     for job in self.job_applications.iter() {
-    //         if job.job_id == job_id_.clone() && job.applicant == applicant.clone() {
-    //             let k = job;
-    //             app = Some(job);
-    //         }
-    //     }
-    //     app
-    // }
+    #[private]
+    pub fn get_job_aplication(&self, job_id_: &U128, applicant: &AccountId) -> Option<JobApplication> {
+        self.job_applications.get(job_id_).unwrap().get(applicant)
+    }
 
     #[private]
     pub fn on_mint_certificate_callback(&mut self, owner_id: AccountId, skills: Vec<U128>, course_id: U128, trainer: AccountId, #[callback_unwrap] token: Token) {
