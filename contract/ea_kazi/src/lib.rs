@@ -197,7 +197,7 @@ impl EAKazi {
 
     // for jobs exceeding 12 months, 12 month wage would be initially deducted
     #[payable]
-    pub fn create_job(&mut self, job_id_: U128, job_owner: AccountId, name: String, description_: String, skills_: Vec<U128>, wage: U128, number_of_roles: u128, duration: u128) {
+    pub fn create_job(&mut self, job_id_: U128, name: String, description_: String, skills_: Vec<U128>, wage: U128, number_of_roles: u128, duration: u128) {
 
         let wage_to_pay = wage.0 * number_of_roles * duration;
         require!(env::attached_deposit() >= wage_to_pay, "Attach wage to be paid to escrow first");
