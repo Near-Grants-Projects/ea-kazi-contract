@@ -1,4 +1,3 @@
-fn main() {
-    let k = "Hi";
-    println!("Hello, world!");
-}
+fn main() {}
+// mod certificatenft;
+mod eakazi;
